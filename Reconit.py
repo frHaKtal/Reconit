@@ -108,11 +108,9 @@ def add_domains_in_parallel_multithread(program_name, domains):
     print("✔️  Processing complete.")
 
 def add_url(program_name, new_url):
-    # Connexion à la base de données
+
     conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
-
-    # Vérifier si le programme existe et récupérer l'URL existante
     cursor.execute("SELECT url FROM programs WHERE program_name = ?", (program_name,))
     result = cursor.fetchone()
 
@@ -162,19 +160,14 @@ def enum_url(domain_name):
 
 
 def display_screenshot_with_imgcat(screenshot_data):
-    # Convertir les données blob en image utilisable
     #print(screenshot_data)
     image_data = base64.b64decode(screenshot_data)
 
-    # Sauvegarder temporairement l'image pour imgcat
     temp_image_path = "/tmp/temp_screenshot.png"
     with open(temp_image_path, "wb") as img_file:
         img_file.write(image_data)
 
-    # Utiliser imgcat pour afficher l'image dans le terminal
     os.system(f"imgcat {temp_image_path}")
-
-    # Supprimer le fichier temporaire après affichage
     os.remove(temp_image_path)
 
 
@@ -184,7 +177,6 @@ def rm(entity_type, *entity_names):
 
     try:
         if entity_type == 'program':
-            # Supprimer plusieurs programmes
             for entity_name in entity_names:
                 cursor.execute('SELECT id FROM programs WHERE program_name = ?', (entity_name,))
                 program = cursor.fetchone()
@@ -231,37 +223,29 @@ def rm(entity_type, *entity_names):
 
 
 def add_com(target_type, target_name, comment):
-    """
-    Ajoute ou met à jour un commentaire pour un programme ou un domaine.
-    :param target_type: Le type de cible ('program' ou 'domain')
-    :param target_name: Le nom du programme ou du domaine
-    :param comment: Le commentaire à ajouter ou mettre à jour
-    """
+
     conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
 
     try:
         if target_type == 'program':
-            # Vérifier si le programme existe
             cursor.execute('SELECT id FROM programs WHERE program_name = ?', (target_name,))
             program = cursor.fetchone()
 
             if program:
                 program_id = program[0]
-                # Ajouter ou mettre à jour le commentaire du programme
                 cursor.execute('UPDATE programs SET com = ? WHERE id = ?', (comment, program_id))
                 conn.commit()
                 print(f"✔️ Comment added to program '{target_name}'")
             else:
                 print(f"❌ Program '{target_name}' not found.")
         elif target_type == 'domain':
-            # Vérifier si le domaine existe
+           
             cursor.execute('SELECT id FROM domains WHERE domain_name = ?', (target_name,))
             domain = cursor.fetchone()
 
             if domain:
                 domain_id = domain[0]
-                # Ajouter ou mettre à jour le commentaire du domaine
                 cursor.execute('UPDATE domain_details SET com = ? WHERE domain_id = ?', (comment, domain_id))
                 conn.commit()
                 print(f"✔️ Comment added to domain '{target_name}'")
@@ -271,7 +255,7 @@ def add_com(target_type, target_name, comment):
             print(f"❌ Invalid target type. Use 'program' or 'domain'.")
 
     finally:
-        # Fermer le curseur avant la connexion
+
         cursor.close()
         conn.close()
 
@@ -282,14 +266,11 @@ def show(program_name=None):
     cursor = conn.cursor()
 
     if program_name:
-        # Récupérer l'ID du programme
         cursor.execute('SELECT id FROM programs WHERE program_name = ?', (program_name,))
         program = cursor.fetchone()
 
         if program:
             program_id = program[0]
-
-            # Récupérer le nombre de domaines pour ce programme
             cursor.execute('''
                 SELECT COUNT(*) FROM domains
                 WHERE program_id = ?
@@ -318,7 +299,6 @@ def show(program_name=None):
             if domains:
                 print(f"\n📄 List of domains for program \033[1m{program_name}\033[0m:")
 
-                # Dictionnaire pour grouper les domaines par phash
                 grouped_domains = {}
 
                 for domain in domains:
@@ -327,7 +307,6 @@ def show(program_name=None):
                         grouped_domains[phash] = []
                     grouped_domains[phash].append(domain)
 
-                # Afficher les groupes de domaines par phash
                 for phash, group in grouped_domains.items():
                     if len(group) > 1:
                         print(f"⚠️  Domains with identical phash \033[1m{phash}\033[0m:")
@@ -379,8 +358,6 @@ def search(search_text, program_name):
     console = Console()
     conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
-
-    # Récupérer l'ID du programme en fonction de son nom
     cursor.execute('SELECT id FROM programs WHERE program_name = ?', (program_name,))
     program = cursor.fetchone()
 
@@ -392,7 +369,6 @@ def search(search_text, program_name):
 
     program_id = program[0]
 
-    # Rechercher dans plusieurs colonnes pour le programme en cours
     query = '''
         SELECT domains.domain_name, domain_details.http_status, domain_details.ip, domain_details.title,
                domain_details.techno, domain_details.open_port, domain_details.screen, domain_details.spfdmarc,
@@ -571,21 +547,18 @@ def llist(entity_type, program_name=None):
     conn.close()
 
 def add_program(program_name):
-    # Ouvrir une connexion à la base de données
     #conn = get_db_connection()
     #cursor = conn.cursor()
     conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
 
     try:
-        # Vérifier si le programme existe déjà
         cursor.execute('SELECT id FROM programs WHERE program_name = ?', (program_name,))
         existing_program = cursor.fetchone()
 
         if existing_program:
             print(f"⚠️  Program '{program_name}' already exists.")
         else:
-            # Ajouter le programme s'il n'existe pas
             cursor.execute('INSERT INTO programs (program_name) VALUES (?)', (program_name,))
             conn.commit()
             print(f"✔️  Program '{program_name}' added successfully.")
@@ -597,7 +570,6 @@ def add_program(program_name):
 
 def main():
 
-    # Vérifier si des arguments sont passés dans la ligne de commande
     if len(sys.argv) > 1:
         session = PromptSession()
         #print_formatted_text("\n【Welcome to ReconNinja v1.0 by _frHaKtal_】")
@@ -628,9 +600,6 @@ def main():
                                 print(f"✔️  \033[1m{len(domain_enum.splitlines())}\033[0m domain find")
                             else:
                                 domains.append(domain)
-                        # Lancer l'ajout des domaines en parallèle
-                        #print(len(domains))
-                        #print(domains)
                         maintest(domains, program_name)
                         #add_domains_in_parallel_multithread(program_name, domains)
                         #process_domains(domains)
@@ -653,7 +622,7 @@ def main():
                         if len(args) >= 3:
                             target_type = args[0]
                             target_name = args[1]
-                            comment = " ".join(args[2:])  # Prendre le reste des arguments comme commentaire
+                            comment = " ".join(args[2:]) 
                             add_com(target_type, target_name, comment)
                         else:
                             print("❌ Usage: add_com [program|domain] [name] [comment]")
@@ -666,7 +635,7 @@ def main():
                 print("Exiting...")
                 break
     else:
-        # Si aucun argument n'est passé, afficher la liste des programmes
+
         llist('program')
 
 if __name__ == "__main__":
