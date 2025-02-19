@@ -13,12 +13,12 @@ import io
 from PIL import Image
 import json
 
-# Connexion à la base de données
+
 def get_db_connection():
     return sqlite3.connect('database.db')
 
 def execute_command(command):
-    """Exécute une commande shell de manière sécurisée et retourne la sortie."""
+    
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         return result.stdout.strip().split('\n')
@@ -26,7 +26,7 @@ def execute_command(command):
         return []
 
 def get_spfdmarc(domain):
-    """Vérifie la présence des enregistrements SPF et DMARC pour un domaine."""
+    
     spf_records = execute_command(["dig", "TXT", domain, "+short"])
     dmarc_records = execute_command(["dig", "TXT", f"_dmarc.{domain}", "+short"])
 
@@ -36,12 +36,12 @@ def get_spfdmarc(domain):
     return f"{spf_check} {dmarc_check}"
 
 def get_method(domain):
-    # Tester HTTPS
+   
     https_command = f"curl -s -X OPTIONS -I https://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
     https_result = subprocess.run(https_command, shell=True, capture_output=True, text=True)
     method_https = https_result.stdout.strip()
 
-    # Tester HTTP
+
     http_command = f"curl -s -X OPTIONS -I http://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
     http_result = subprocess.run(http_command, shell=True, capture_output=True, text=True)
     method_http = http_result.stdout.strip()
@@ -58,12 +58,12 @@ def get_method(domain):
 
 
 def get_httpx_data(domains):
-    """Récupère le statut HTTP, la méthode, le titre, l'IP et les technologies d'une liste de domaines."""
+    
     domain_results = {}
     #driver = setup_selenium_driver()
     domains_str = "\n".join(domains)
 #f"echo \"{domains_str}\" > file.txt | httpx --tech-detect --silent -nc -timeout 3 -l file.txt"
-    # Exécuter httpx sur la liste des domaines
+
     result = subprocess.run(
         f"echo \"{domains_str}\" > file.txt | httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
         shell=True,
@@ -117,7 +117,7 @@ def get_httpx_data(domains):
 
 
 def take_screenshot_base64(url):
-    """Prend un screenshot en base64 sans écrire de fichier."""
+    
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -133,9 +133,9 @@ def take_screenshot_base64(url):
 
 
 def take_screenshots_parallel(urls, max_workers=20):
-    """Lance plusieurs screenshots en parallèle et retourne un dict avec les résultats."""
+    
 
-    # 🔥 Vérifie que urls est bien une liste
+   
     if isinstance(urls, str):
         urls = [urls]  # Convertit une chaîne en liste
 
@@ -150,12 +150,12 @@ def take_screenshots_parallel(urls, max_workers=20):
 
 
 def update_db(program_name, domain_data):
-    """Ajoute ou met à jour les données du domaine dans la base de données."""
+    
 
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
 
-        # Récupérer l'ID du programme
+        
         cursor.execute("SELECT id FROM programs WHERE program_name = ?", (program_name,))
         program_id = cursor.fetchone()
 
@@ -165,25 +165,25 @@ def update_db(program_name, domain_data):
 
         program_id = program_id[0]
 
-        # Insérer les domaines et leurs détails
+        
         for domain, data in domain_data.items():
             if data is None:
                 continue  # Si aucune donnée, on passe
 
-            # Insérer le domaine s'il n'existe pas
+            
             cursor.execute(
                 'INSERT OR IGNORE INTO domains (program_id, domain_name) VALUES (?, ?)',
                 (program_id, domain)
             )
 
-            # Récupérer l'ID du domaine (nouvellement inséré ou existant)
+            
             cursor.execute(
                 'SELECT id FROM domains WHERE program_id = ? AND domain_name = ?',
                 (program_id, domain)
             )
             domain_id = cursor.fetchone()[0]
 
-            # Insérer les détails dans domain_details
+           
             cursor.execute('''
                 INSERT INTO domain_details
                 (domain_id, http_status, method, title, ip, techno, open_port, screen, phash, spfdmarc)
@@ -204,11 +204,11 @@ def update_db(program_name, domain_data):
         conn.commit()
 
 def update_dbb(program_name, domain_data):
-    """Ajoute ou met à jour les données du domaine dans la base de données."""
+    
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
 
-        # Récupérer l'ID du programme
+        
         cursor.execute("SELECT id FROM programs WHERE program_name = ?", (program_name,))
         program_id = cursor.fetchone()
 
@@ -218,10 +218,10 @@ def update_dbb(program_name, domain_data):
 
         program_id = program_id[0]
 
-        # Insérer les domaines et leurs détails
+        
         for domain, data in domain_data.items():
             if data is None:
-                continue  # Si aucune donnée, on passe
+                continue  
 
             cursor.execute(
                 'INSERT OR IGNORE INTO domains (program_id, domain_name) VALUES (?, ?)',
@@ -229,7 +229,7 @@ def update_dbb(program_name, domain_data):
             )
             domain_id = cursor.lastrowid  # ID du domaine inséré
 
-            # Insérer les détails dans domain_details
+     
             cursor.execute('''
                 INSERT INTO domain_details
                 (domain_id, http_status, method, title, ip, techno, open_port, screen, phash, spfdmarc)
@@ -253,7 +253,7 @@ def update_dbb(program_name, domain_data):
 
 def scan_naabu_fingerprint(domain):
     try:
-        # Exécuter la commande avec un timeout de 10 secondes
+        
         result = subprocess.run(
             f"naabu -host {domain} -retries 1 -ec -silent -s s 2>/dev/null | grep -oP '\d+(?=\s*$)' | tr '\n' ',' | sed 's/,$//'",
             shell=True,
@@ -263,7 +263,7 @@ def scan_naabu_fingerprint(domain):
             timeout=5  # Timeout de 10 secondes
         )
 
-        # Renvoyer la sortie de la commande (stdout)
+        
         return result.stdout
     except subprocess.TimeoutExpired:
         #print(f"⏰ Scan {dom} Timeout")
@@ -276,31 +276,17 @@ def scan_naabu_fingerprint(domain):
 
 def get_phash(screenshot_base64):
     try:
-        # Décoder l'image en base64 pour obtenir les bytes
+        
         image_data = base64.b64decode(screenshot_base64)
-
-        # Créer une image PIL à partir des bytes
         image = Image.open(io.BytesIO(image_data))
-
-        # Calculer le perceptual hash
         phash_value = str(imagehash.phash(image))
         return phash_value
 
     except Exception as e:
-        #print(f"Failed to calculate phash: {e}")
+        
         return None
 
 
-def ssetup_selenium_driver():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--log-level=3")
-    return webdriver.Chrome(options=chrome_options)
-
-
-# Fonction principale pour démarrer le traitement
 def maintest(domains, program_name):
     end=get_httpx_data(domains)
     update_db(program_name,end)
