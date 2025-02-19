@@ -7,7 +7,7 @@ import sqlite3
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.shortcuts import print_formatted_text
-from enum_task import add_dom
+from enum_task import *
 from setup_database import setup_database
 import subprocess
 import base64
@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
+
 def lolcat(text):
     os.system(f"echo '{text}' | lolcat")
 
@@ -28,11 +29,10 @@ commands_with_descriptions = {
     'add': 'Add domain1.com domain2.com or *.domain.com',
     'add_com': 'Add comment to domain or program (add_com domain/program domain.com "xx")',
     'rm': 'Remove a domain (without http) or program (rm domain/program xx)',
-    'list': 'Domain of program list (list domain/ip/program)',
-    'show': 'Show domain list with screenshot',
+    'list': 'Domain of program list (list domain/ip/url/program)',
+    'show': 'Show domain (list domain with screenshot)',
     'search': 'Search in domain list (search xx)',
     'clear': 'Clear screen',
-    'url': 'Find url discovery with katana,gospider,hakrawler',
 }
 
 class CommandCompleter(Completer):
@@ -43,39 +43,19 @@ class CommandCompleter(Completer):
             if command.startswith(word_before_cursor):
                 yield Completion(command, start_position=-len(word_before_cursor), display_meta=description)
 
-def add_domains_in_parallel_multiprocessing(program_name, domains):
-    print("✔️  Processing domains recon...")
-
-    with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
-        results = [pool.apply_async(add_dom, (program_name, domain)) for domain in domains]
-
-        for result in results:
-            try:
-                result.get()  # Attendre la fin de chaque tâche
-            except Exception as e:
-                print(f"Error during domain addition: {e}")
-
-    print("✔️  Processing complete.")
-
-def add_domains_in_parallel_multithread(program_name, domains):
-    print("✔️  Processing domains recon...")
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = [executor.submit(add_dom, program_name, domain) for domain in domains]
-
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()  # Attendre la fin de chaque tâche
-            except Exception as e:
-                print(f"Error during domain addition: {e}")
-
-    print("✔️  Processing complete.")
+def setup_selenium_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--log-level=3")
+    return webdriver.Chrome(options=chrome_options)
 
 def enum_domain(domain_name, method):
     result_lines = []  # Liste pour stocker les résultats ligne par ligne
 
     if method == "passive":
-        print(f"✔️  Enumeration passive for domain: \033[1m{domain_name}\033[0m")
+        print(f"❗️ Enumeration passive for domain: \033[1m{domain_name}\033[0m")
 
         print(f"✔️  Subfinder")
         subfinder_result = subprocess.run(f"subfinder -d {domain_name} -silent -all -recursive",
@@ -104,6 +84,82 @@ def enum_domain(domain_name, method):
     unique_sorted_result = sorted(set(result_lines))
 
     return "\n".join(unique_sorted_result)
+def get_domains():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, domain_name FROM domains")
+    domains = [{"id": row[0], "domain_name": row[1]} for row in cursor.fetchall()]
+    conn.close()
+    return domains
+
+def add_domains_in_parallel_multithread(program_name, domains):
+    print("✔️  Processing domains recon...")
+
+    def safe_add_dom(domain):
+        try:
+            return add_dom(setup_selenium_driver(), program_name, domain)
+        except Exception as e:
+            print(f"Error during domain addition ({domain}): {e}")
+            return None  # Retourne None en cas d'erreur
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        list(executor.map(safe_add_dom, domains))
+
+    print("✔️  Processing complete.")
+
+def add_url(program_name, new_url):
+    # Connexion à la base de données
+    conn = sqlite3.connect('database.db')
+    cursor = conn.cursor()
+
+    # Vérifier si le programme existe et récupérer l'URL existante
+    cursor.execute("SELECT url FROM programs WHERE program_name = ?", (program_name,))
+    result = cursor.fetchone()
+
+    if not result:
+        print(f"❌ Program '{program_name}' not found.")
+    else:
+        current_url = result[0]
+        if current_url:
+            # Ajouter la nouvelle URL à l'URL existante (séparée par un espace ou autre délimiteur)
+            new_combined_url = current_url + "\n" + new_url
+            cursor.execute("UPDATE programs SET url = ? WHERE program_name = ?", (new_combined_url, program_name))
+            print(f"✅ URL added to program '{program_name}': {new_combined_url}")
+        else:
+            # Si l'URL est vide, on peut simplement l'ajouter
+            cursor.execute("UPDATE programs SET url = ? WHERE program_name = ?", (new_url, program_name))
+            print(f"✅ URL added for program '{program_name}': {new_url}")
+
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+
+def enum_url(domain_name):
+
+        result_lines = []
+
+        print(f"❗ Finding url for domain: \033[1m{domain_name}\033[0m")
+        print(f"✔️  Gau")
+        gau_result = subprocess.run(f"gau {domain_name}",
+                                      shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result_lines.extend(gau_result.stdout.splitlines())
+
+        print(f"✔️  Katana")
+        katana_result = subprocess.run(f"katana -u {domain_name} -jc -silent",
+                                      shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result_lines.extend(katana_result.stdout.splitlines())
+
+        print(f"✔️  Gospider")
+        gospider_result = subprocess.run(f"gospider -s https://{domain_name}",
+                                      shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result_lines.extend(gospider_result.stdout.splitlines())
+
+        print(f"✔️  Hakrawler")
+        hakrawler_result = subprocess.run(f"echo 'https://{domain_name}' | hakrawler",
+                                      shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result_lines.extend(hakrawler_result.stdout.splitlines())
+
 
 def display_screenshot_with_imgcat(screenshot_data):
     # Convertir les données blob en image utilisable
@@ -284,19 +340,18 @@ def show(program_name=None):
                         console.print(f"[dim]🔄 Http method:[/dim] [bold]{method}[/bold]")
                         console.print(f"[dim]🖥️ IP:[/dim] [bold]{ip}[/bold]")
                         console.print(f"[dim]🏷️ Title:[/dim] [bold]{title}[/bold]")
-                        #console.print(f"[dim]Tech:[/dim] [bold]{techno}[/bold]")
                         console.print(f"[dim]🛠️ Tech:[/dim]", end=" ")
                         tech=str(techno)
+
                         for index, techsplit in enumerate(tech.split(",")):
                             console.print(f"[black on grey100]{techsplit}[/black on grey100]", end=" " if index < len(tech.split(",")) - 1 else "\n")
 
                         #console.print(f"[dim]Open port:[/dim] [bold]{open_port}[/bold]")
                         console.print("[dim]🔓 Open port:[/dim]", end=" ")
                         open_ports=str(open_port)
+                        #print(f"{open_ports}")
                         for index, port in enumerate(open_ports.split(",")):
                             console.print(f"[black on grey100]{port}[/black on grey100]", end=" " if index < len(open_ports.split(",")) - 1 else "\n")
-
-                        #console.print("[dim]Open port:[/dim]" + "" + "[red on grey100]" + f"{open_port}" + "[white on black]" + "", style="")
                         console.print(f"[dim]✉️ Spf/Dmarc:[/dim] [bold]{spfdmarc}[/bold]")
 
                         if comment:
@@ -319,7 +374,6 @@ def show(program_name=None):
 
     cursor.close()
     conn.close()
-
 
 def search(search_text, program_name):
     console = Console()
@@ -411,7 +465,8 @@ def search(search_text, program_name):
     conn.close()
 
 
-def list(entity_type, program_name=None):
+def llist(entity_type, program_name=None):
+
     conn = sqlite3.connect('database.db')
     cursor = conn.cursor()
 
@@ -430,7 +485,6 @@ def list(entity_type, program_name=None):
 
     elif entity_type == 'domain':
         if program_name:
-            # Récupérer l'ID du programme en fonction de son nom
             cursor.execute('''
                 SELECT id FROM programs WHERE program_name = ?
             ''', (program_name,))
@@ -438,7 +492,6 @@ def list(entity_type, program_name=None):
 
             if program:
                 program_id = program[0]
-                # Récupérer les domaines associés au programme
                 cursor.execute('''
                     SELECT domain_name FROM domains
                     WHERE program_id = ?
@@ -459,7 +512,6 @@ def list(entity_type, program_name=None):
 
     elif entity_type == 'ip':
         if program_name:
-            # Récupérer l'ID du programme en fonction de son nom
             cursor.execute('''
                 SELECT id FROM programs WHERE program_name = ?
             ''', (program_name,))
@@ -467,7 +519,6 @@ def list(entity_type, program_name=None):
 
             if program:
                 program_id = program[0]
-                # Récupérer les IP associées aux domaines du programme
                 cursor.execute('''
                     SELECT DISTINCT domain_details.ip FROM domain_details
                     JOIN domains ON domains.id = domain_details.domain_id
@@ -487,8 +538,34 @@ def list(entity_type, program_name=None):
         else:
             print("❌ Please specify a program name to list IP addresses.")
 
+    elif entity_type == 'url':
+        if program_name:
+            cursor.execute('''
+                SELECT id FROM programs WHERE program_name = ?
+            ''', (program_name,))
+            program = cursor.fetchone()
+
+            if program:
+                program_id = program[0]
+                cursor.execute('''
+                    SELECT url FROM programs
+                    WHERE id = ?
+                ''', (program_id,))
+                urls = cursor.fetchall()
+
+                if urls:
+                    print(f"\n📄 List of URLs for program '{program_name}':")
+                    for url in urls:
+                        print(f"\033[0m{url[0]}\033[0m")
+                else:
+                    print(f"❌ No URLs found for program '{program_name}'.")
+            else:
+                print(f"❌ Program '{program_name}' not found.")
+        else:
+            print("❌ Please specify a program name to list URLs.")
+
     else:
-        print("❌ Invalid entity type. Use 'program', 'domain', or 'ip'.")
+        print("❌ Invalid entity type. Use 'program', 'domain', 'ip', or 'url'.")
 
     cursor.close()
     conn.close()
@@ -525,7 +602,7 @@ def main():
         session = PromptSession()
         #print_formatted_text("\n【Welcome to ReconNinja v1.0 by _frHaKtal_】")
         #print_formatted_text("‼️ Press tab for autocompletion and available commands\n")
-        lolcat("\n【Welcome to ReconNinja v1.0 by _frHaKtal_】")
+        lolcat("\n【Welcome to Recon-it v1.0 by _frHaKtal_】")
         lolcat("‼️ Press tab for autocompletion and available commands\n")
 
         setup_database()
@@ -551,18 +628,25 @@ def main():
                                 print(f"✔️  \033[1m{len(domain_enum.splitlines())}\033[0m domain find")
                             else:
                                 domains.append(domain)
-
                         # Lancer l'ajout des domaines en parallèle
                         #print(len(domains))
                         #print(domains)
-                        add_domains_in_parallel_multithread(program_name, domains)
+                        maintest(domains, program_name)
+                        #add_domains_in_parallel_multithread(program_name, domains)
+                        #process_domains(domains)
                     elif command == 'show':
                         show(sys.argv[1])
+                        #print(args[0])
+                    elif command == 'add_url':
+                        add_url(args[0], args[1])
                     elif command == 'search':
                         search(args[0],sys.argv[1])
                     elif command == 'list':
                         if args:
-                            list(args[0], sys.argv[1])
+                            llist(args[0], sys.argv[1])
+                            #print(args[0], sys.argv[1])
+                        else:
+                            print("❌ Usage: list [domain|program|ip|url]")
                     elif command == 'clear':
                         os.system('clear')
                     elif command == 'add_com':
@@ -583,7 +667,7 @@ def main():
                 break
     else:
         # Si aucun argument n'est passé, afficher la liste des programmes
-        list('program')
+        llist('program')
 
 if __name__ == "__main__":
     main()
