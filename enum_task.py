@@ -5,6 +5,8 @@ import socket
 import subprocess
 from playwright.sync_api import sync_playwright
 from concurrent.futures import ThreadPoolExecutor
+from rich.progress import Progress, SpinnerColumn, BarColumn, TimeRemainingColumn
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import concurrent.futures
 import tldextract
 import re
@@ -13,57 +15,104 @@ import io
 from PIL import Image
 import json
 
-
 def get_db_connection():
     return sqlite3.connect('database.db')
 
-def execute_command(command):
-    
+def execute_command(command, timeout=2):
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=True)
-        return result.stdout.strip().split('\n')
-    except subprocess.CalledProcessError as e:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        return result.stdout.strip().split("\n") if result.stdout.strip() else []
+    except subprocess.TimeoutExpired:
+        #print(f"[⚠] Timeout : La commande {' '.join(command)} a dépassé {timeout} secondes.")
+        return []  # Retourne une liste vide si timeout
+    except Exception as e:
+        #print(f"[⚠] Erreur : {e}")
         return []
 
-def get_spfdmarc(domain):
-    
-    spf_records = execute_command(["dig", "TXT", domain, "+short"])
-    dmarc_records = execute_command(["dig", "TXT", f"_dmarc.{domain}", "+short"])
+def get_spfdmarc(domain, timeout=2):
+
+    def get_dns_record(query):
+        return execute_command(["dig", "TXT", query, "+short"], timeout=timeout)
+
+    # Exécuter SPF et DMARC en parallèle
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        spf_future = executor.submit(get_dns_record, domain)
+        dmarc_future = executor.submit(get_dns_record, f"_dmarc.{domain}")
+
+        spf_records = spf_future.result()
+        dmarc_records = dmarc_future.result()
 
     spf_check = "✔️" if any("v=spf1" in record for record in spf_records) else "❌"
     dmarc_check = "✔️" if any("v=DMARC1" in record for record in dmarc_records) else "❌"
 
     return f"{spf_check} {dmarc_check}"
 
-def get_method(domain):
-   
-    https_command = f"curl -s -X OPTIONS -I https://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
-    https_result = subprocess.run(https_command, shell=True, capture_output=True, text=True)
-    method_https = https_result.stdout.strip()
+def get_spfdmarc_parallel(domains, max_workers=20):
+    results = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_domain = {executor.submit(get_spfdmarc, domain): domain for domain in domains}
+
+        for future in concurrent.futures.as_completed(future_to_domain):
+            domain = future_to_domain[future]
+            try:
+                results[domain] = future.result()
+            except Exception as e:
+                results[domain] = f"Error: {e}"
+
+    return results
 
 
-    http_command = f"curl -s -X OPTIONS -I http://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
-    http_result = subprocess.run(http_command, shell=True, capture_output=True, text=True)
-    method_http = http_result.stdout.strip()
+def get_method(domain, timeout=1):
+
+    def run_command(command):
+        try:
+            result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
+            return result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            return ""
+
+    https_command = f"curl --max-time {timeout} -s -X OPTIONS -I https://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
+    http_command = f"curl --max-time {timeout} -s -X OPTIONS -I http://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
+
+    # Exécuter en parallèle HTTPS et HTTP
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        https_future = executor.submit(run_command, https_command)
+        http_future = executor.submit(run_command, http_command)
+
+        method_https = https_future.result()
+        method_http = http_future.result()
 
     result = []
-
-    if method_https:  # Si method_https n'est pas vide
+    if method_https:
         result.append(f"https: {method_https}")
-
-    if method_http:  # Si method_http n'est pas vide
+    if method_http:
         result.append(f"http: {method_http}")
 
     return " | ".join(result) if result else "No methods found"
 
+def get_methods_parallel(domains, max_workers=20):
+    methods = {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_domain = {executor.submit(get_method, domain): domain for domain in domains}
+
+        for future in concurrent.futures.as_completed(future_to_domain):
+            domain = future_to_domain[future]
+            try:
+                methods[domain] = future.result()
+            except Exception as e:
+                methods[domain] = f"Error: {e}"
+    return methods
+
 
 def get_httpx_data(domains):
-    
+    print(f"✔️  Get Httpx data")
     domain_results = {}
     #driver = setup_selenium_driver()
     domains_str = "\n".join(domains)
 #f"echo \"{domains_str}\" > file.txt | httpx --tech-detect --silent -nc -timeout 3 -l file.txt"
-
+    # Exécuter httpx sur la liste des domaines
     result = subprocess.run(
         f"echo \"{domains_str}\" > file.txt | httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
         shell=True,
@@ -75,6 +124,8 @@ def get_httpx_data(domains):
     if not result.stdout.strip():
         return {domain: None for domain in domains}
 
+    method = get_methods_parallel(domains, max_workers=20)
+    spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
     screenshots=take_screenshots_parallel(domains, max_workers=20)
     for line in result.stdout.split("\n"):
         match = re.search(r"(https?:\/\/[^\s]+) \[(\d+)\] \[(\w+)\] \[(.*?)\] \[(.*?)\] \[(.*?)\]", line)
@@ -83,7 +134,8 @@ def get_httpx_data(domains):
             domain = match.group(1).replace("https://", "").replace("http://", "")
             http_status = match.group(2)
             #method = match.group(3)
-            method = get_method(domain)
+            #method = get_methods_parallel()
+            methods = method.get(domain, None)
             title = match.group(4)
             ip = match.group(5)
             tech_list = match.group(6).split(", ") if match.group(6) else []
@@ -93,7 +145,7 @@ def get_httpx_data(domains):
             screenshot = screenshots.get(domain, None)
             domain_results[domain] = {
                 "http_status": http_status,
-                "method": method,
+                "method": methods,
                 "title": title,
                 "ip": ip,
                 "tech_list": tech_list,
@@ -101,7 +153,8 @@ def get_httpx_data(domains):
                 "open_port": "xx",  # Scan des ports ouverts
                 "screen": screenshot,  # Capture d'écran
                 "phash": get_phash(screenshot),  # Perceptual hash de l'image
-                "spfdmarc": get_spfdmarc(domain_principal.group(1))  # SPF/DMARC info
+                #"spfdmarc": get_spfdmarc(domain_principal.group(1))  # SPF/DMARC info
+                "spfdmarc": spfdmarc.get(domain, None)
             }
 
     result = subprocess.run(
@@ -111,19 +164,18 @@ def get_httpx_data(domains):
         stderr=subprocess.PIPE,
         text=True
     )
-
     return domain_results
 
 
 
 def take_screenshot_base64(url):
-    
+    #print(f"screenshot {url}")
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             #print(url)
-            page.goto(f"http://{url}", timeout=5000)  # Timeout max de 10s
+            page.goto(f"http://{url}", timeout=2000)  # Timeout max de 2s
             screenshot = page.screenshot()
             browser.close()
             return base64.b64encode(screenshot).decode('utf-8')
@@ -132,30 +184,43 @@ def take_screenshot_base64(url):
         return None
 
 
-def take_screenshots_parallel(urls, max_workers=20):
-    
 
-   
+def take_screenshots_parallel(urls, max_workers=20):
     if isinstance(urls, str):
-        urls = [urls]  # Convertit une chaîne en liste
+        urls = [urls]
 
     results = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for url, screenshot in zip(urls, executor.map(take_screenshot_base64, urls)):
-            if screenshot:
-                results[url] = screenshot #modifier ici
-                #domain_results[domain_name]['screen'].append(screenshot_base64)
+
+    with Progress(
+        SpinnerColumn(),  # Petit spinner
+        "[progress.description]{task.description}",  # Description de la tâche
+        BarColumn(),  # Barre de progression
+        TimeRemainingColumn(),  # Temps restant estimé
+    ) as progress:
+        task = progress.add_task("Capturing Screenshots", total=len(urls))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(take_screenshot_base64, url): url for url in urls}
+
+            for future in as_completed(futures):
+                url = futures[future]
+                try:
+                    screenshot = future.result()
+                    if screenshot:
+                        results[url] = screenshot
+                except Exception as e:
+                    results[url] = f"Error: {e}"  # Garde l'erreur dans le dict
+
+                progress.update(task, advance=1)  # ✅ Indentation correcte ici
 
     return results
 
 
 def update_db(program_name, domain_data):
-    
 
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
 
-        
         cursor.execute("SELECT id FROM programs WHERE program_name = ?", (program_name,))
         program_id = cursor.fetchone()
 
@@ -165,25 +230,21 @@ def update_db(program_name, domain_data):
 
         program_id = program_id[0]
 
-        
         for domain, data in domain_data.items():
             if data is None:
-                continue  # Si aucune donnée, on passe
+                continue
 
-            
             cursor.execute(
                 'INSERT OR IGNORE INTO domains (program_id, domain_name) VALUES (?, ?)',
                 (program_id, domain)
             )
 
-            
             cursor.execute(
                 'SELECT id FROM domains WHERE program_id = ? AND domain_name = ?',
                 (program_id, domain)
             )
             domain_id = cursor.fetchone()[0]
 
-           
             cursor.execute('''
                 INSERT INTO domain_details
                 (domain_id, http_status, method, title, ip, techno, open_port, screen, phash, spfdmarc)
@@ -203,57 +264,9 @@ def update_db(program_name, domain_data):
 
         conn.commit()
 
-def update_dbb(program_name, domain_data):
-    
-    with sqlite3.connect("database.db") as conn:
-        cursor = conn.cursor()
-
-        
-        cursor.execute("SELECT id FROM programs WHERE program_name = ?", (program_name,))
-        program_id = cursor.fetchone()
-
-        if not program_id:
-            print(f"⚠️ Erreur : Aucun programme trouvé pour '{program_name}'.")
-            return
-
-        program_id = program_id[0]
-
-        
-        for domain, data in domain_data.items():
-            if data is None:
-                continue  
-
-            cursor.execute(
-                'INSERT OR IGNORE INTO domains (program_id, domain_name) VALUES (?, ?)',
-                (program_id, domain)
-            )
-            domain_id = cursor.lastrowid  # ID du domaine inséré
-
-     
-            cursor.execute('''
-                INSERT INTO domain_details
-                (domain_id, http_status, method, title, ip, techno, open_port, screen, phash, spfdmarc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                domain_id,
-                data["http_status"],
-                data["method"],
-                data["title"],
-                data["ip"],
-                ", ".join(data["tech_list"]) if data["tech_list"] else None,
-                #", ".join(map(str, data["open_port"])) if data["open_port"] else None,
-                str(data["open_port"]) if data["open_port"] else None,
-                str(data["screen"]) if data["screen"] else None,
-                str(data["phash"]) if data["phash"] else None,
-                str(data["spfdmarc"]) if data["spfdmarc"] else None
-            ))
-
-        conn.commit()
-
 
 def scan_naabu_fingerprint(domain):
     try:
-        
         result = subprocess.run(
             f"naabu -host {domain} -retries 1 -ec -silent -s s 2>/dev/null | grep -oP '\d+(?=\s*$)' | tr '\n' ',' | sed 's/,$//'",
             shell=True,
@@ -263,7 +276,6 @@ def scan_naabu_fingerprint(domain):
             timeout=5  # Timeout de 10 secondes
         )
 
-        
         return result.stdout
     except subprocess.TimeoutExpired:
         #print(f"⏰ Scan {dom} Timeout")
@@ -276,14 +288,13 @@ def scan_naabu_fingerprint(domain):
 
 def get_phash(screenshot_base64):
     try:
-        
         image_data = base64.b64decode(screenshot_base64)
         image = Image.open(io.BytesIO(image_data))
         phash_value = str(imagehash.phash(image))
         return phash_value
 
     except Exception as e:
-        
+        #print(f"Failed to calculate phash: {e}")
         return None
 
 
