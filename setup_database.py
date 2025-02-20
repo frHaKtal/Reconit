@@ -1,22 +1,21 @@
 import sqlite3
 from enum_task import get_db_connection
 
-conn = sqlite3.connect('database.db')
-cursor = conn.cursor()
-
 def setup_database():
-
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Création des tables
+
+    # Création de la table des programmes
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS programs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             program_name TEXT UNIQUE,
-            com TEXT
+            com TEXT,
+            url TEXT
         )
     ''')
 
+    # Création de la table des domaines
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS domains (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,6 +25,7 @@ def setup_database():
         )
     ''')
 
+    # Création de la table des détails de domaine
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS domain_details (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -45,5 +45,6 @@ def setup_database():
             FOREIGN KEY (domain_id) REFERENCES domains(id) ON DELETE CASCADE
         )
     ''')
+
     conn.commit()
     conn.close()
