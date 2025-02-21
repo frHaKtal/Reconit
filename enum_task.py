@@ -18,7 +18,8 @@ import json
 def get_db_connection():
     return sqlite3.connect('database.db')
 
-def execute_command(command, timeout=2):
+
+def execute_command(command, timeout=1):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         return result.stdout.strip().split("\n") if result.stdout.strip() else []
@@ -29,12 +30,12 @@ def execute_command(command, timeout=2):
         #print(f"[⚠] Erreur : {e}")
         return []
 
-def get_spfdmarc(domain, timeout=2):
+
+def get_spfdmarc(domain, timeout=1):
 
     def get_dns_record(query):
         return execute_command(["dig", "TXT", query, "+short"], timeout=timeout)
 
-    # Exécuter SPF et DMARC en parallèle
     with concurrent.futures.ThreadPoolExecutor() as executor:
         spf_future = executor.submit(get_dns_record, domain)
         dmarc_future = executor.submit(get_dns_record, f"_dmarc.{domain}")
@@ -47,7 +48,10 @@ def get_spfdmarc(domain, timeout=2):
 
     return f"{spf_check} {dmarc_check}"
 
+
 def get_spfdmarc_parallel(domains, max_workers=20):
+
+    print(f"✔️  Get Spf/Dmarc status")
     results = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -75,7 +79,6 @@ def get_method(domain, timeout=1):
     https_command = f"curl --max-time {timeout} -s -X OPTIONS -I https://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
     http_command = f"curl --max-time {timeout} -s -X OPTIONS -I http://{domain} | grep -i 'allow:' | grep -oPi '(?<=allow: ).*'"
 
-    # Exécuter en parallèle HTTPS et HTTP
     with concurrent.futures.ThreadPoolExecutor() as executor:
         https_future = executor.submit(run_command, https_command)
         http_future = executor.submit(run_command, http_command)
@@ -91,7 +94,9 @@ def get_method(domain, timeout=1):
 
     return " | ".join(result) if result else "No methods found"
 
+
 def get_methods_parallel(domains, max_workers=20):
+    print(f"✔️  Get http method")
     methods = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -112,9 +117,11 @@ def get_httpx_data(domains):
     #driver = setup_selenium_driver()
     domains_str = "\n".join(domains)
 #f"echo \"{domains_str}\" > file.txt | httpx --tech-detect --silent -nc -timeout 3 -l file.txt"
-    # Exécuter httpx sur la liste des domaines
+    with open("file.txt", "w") as f:
+        f.write("\n".join(domains))
+
     result = subprocess.run(
-        f"echo \"{domains_str}\" > file.txt | httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
+        f"httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -126,6 +133,7 @@ def get_httpx_data(domains):
 
     method = get_methods_parallel(domains, max_workers=20)
     spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
+    #naabu = scan_naabu_fingerprint(domains, None)
     screenshots=take_screenshots_parallel(domains, max_workers=20)
     for line in result.stdout.split("\n"):
         match = re.search(r"(https?:\/\/[^\s]+) \[(\d+)\] \[(\w+)\] \[(.*?)\] \[(.*?)\] \[(.*?)\]", line)
@@ -149,7 +157,7 @@ def get_httpx_data(domains):
                 "title": title,
                 "ip": ip,
                 "tech_list": tech_list,
-                #"open_port": scan_naabu_fingerprint(domain),  # Scan des ports ouverts
+                #"open_port": naabu.get(domain,None),  # Scan des ports ouverts
                 "open_port": "xx",  # Scan des ports ouverts
                 "screen": screenshot,  # Capture d'écran
                 "phash": get_phash(screenshot),  # Perceptual hash de l'image
@@ -216,8 +224,8 @@ def take_screenshots_parallel(urls, max_workers=20):
     return results
 
 
-def update_db(program_name, domain_data):
-
+def update_db(program_name, domain_data, naabu_results):
+    print(f"✔️  Update db")
     with sqlite3.connect("database.db") as conn:
         cursor = conn.cursor()
 
@@ -243,7 +251,22 @@ def update_db(program_name, domain_data):
                 'SELECT id FROM domains WHERE program_id = ? AND domain_name = ?',
                 (program_id, domain)
             )
-            domain_id = cursor.fetchone()[0]
+            result = cursor.fetchone()
+            #domain_id = cursor.fetchone()[0]
+            if result is None:
+                print(f"⚠️ Erreur : Aucun domaine trouvé pour {domain} dans le programme {program_name}.")
+                continue  # Passer au domaine suivant
+
+            domain_id = result[0]
+
+            # Récupérer l'IP associée au domaine
+            ip = data["ip"] if data["ip"] else None
+            #print(ip)
+            # Récupérer les ports ouverts pour cette IP via Naabu
+            #open_ports = ",".join(map(str, naabu_results.get(ip, []))) if ip else None
+            open_ports = ",".join(map(str, naabu_results.get(str(ip), []))) if ip else None
+
+            data["open_port"] = open_ports
 
             cursor.execute('''
                 INSERT INTO domain_details
@@ -265,25 +288,43 @@ def update_db(program_name, domain_data):
         conn.commit()
 
 
-def scan_naabu_fingerprint(domain):
+def scan_naabu_fingerprint(domains_ips):
+    print(f"✔️  Portscan with Naabu")
+    domains_str = "\n".join(domains_ips)
+    with open("ips.txt", "w") as f:
+        f.write("\n".join(domains_ips) + "\n")
+
     try:
         result = subprocess.run(
-            f"naabu -host {domain} -retries 1 -ec -silent -s s 2>/dev/null | grep -oP '\d+(?=\s*$)' | tr '\n' ',' | sed 's/,$//'",
+            f"naabu -l ips.txt -retries 1 -ec -silent -s s 2>/dev/null",
+#f"echo {domains_str} > ips.txt | naabu -l ips.txt -retries 1 -ec -silent -s s 2>/dev/null | grep -oP '\d+(?=\s*$)' | tr '\n' ',' | sed 's/,$//'",
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            timeout=5  # Timeout de 10 secondes
+            text=True
         )
+        ip_ports = {}
+        for line in result.stdout.splitlines():
+            match = re.match(r"(\d+\.\d+\.\d+\.\d+):(\d+)", line)  # Extraction IP:PORT
+            if match:
+                ip, port = match.groups()
+                if ip not in ip_ports:
+                    ip_ports[ip] = []
+                ip_ports[ip].append(int(port))
 
-        return result.stdout
+        result = subprocess.run(
+            f"rm ips.txt",
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        return ip_ports
+
     except subprocess.TimeoutExpired:
-        #print(f"⏰ Scan {dom} Timeout")
-        return "Timeout"
+        return {}  # Timeout, retourne un dict vide
     except Exception as e:
-        pass
-        #print(f"❌ Error run {dom}: {e}")
-        return None
+        return None  # Erreur, retourne None
 
 
 def get_phash(screenshot_base64):
@@ -300,4 +341,6 @@ def get_phash(screenshot_base64):
 
 def maintest(domains, program_name):
     end=get_httpx_data(domains)
-    update_db(program_name,end)
+    all_ips = list(set(entry["ip"] for entry in end.values() if entry and entry["ip"]))
+    naabu = scan_naabu_fingerprint(all_ips)
+    update_db(program_name,end,naabu)
