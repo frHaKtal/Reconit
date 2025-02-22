@@ -111,12 +111,81 @@ def get_methods_parallel(domains, max_workers=20):
     return methods
 
 
+import re
+import subprocess
+
 def get_httpx_data(domains):
     print(f"✔️  Get Httpx data")
     domain_results = {}
-    #driver = setup_selenium_driver()
+
+    # Écriture des domaines dans un fichier temporaire
+    with open("file.txt", "w") as f:
+        f.write("\n".join(domains))
+
+    # Exécution de httpx
+    result = subprocess.run(
+        f"httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    # Si httpx ne retourne rien, on renvoie un dict avec des valeurs nulles
+    if not result.stdout.strip():
+        return {domain: None for domain in domains}
+
+    # Récupération des résultats parallèles
+    method = get_methods_parallel(domains, max_workers=20)
+    spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
+    screenshots = take_screenshots_parallel(domains, max_workers=20)
+
+    # Regex mise à jour pour matcher 3 ou 6 éléments
+    regex = re.compile(
+        r"(https?:\/\/[^\s]+) \[(\d+)\] \[(\w+)\]"  # URL, Status, Method (obligatoires)
+        r"(?: \[(.*?)\])?"  # Title (optionnel)
+        r"(?: \[(.*?)\])?"  # IP (optionnel)
+        r"(?: \[(.*?)\])?"  # Technologies (optionnel)
+    )
+
+    for line in result.stdout.split("\n"):
+        match = regex.search(line)
+        if match:
+            full_url = match.group(1)
+            domain = full_url.replace("https://", "").replace("http://", "")
+
+            # Extraction des groupes avec valeurs par défaut si absentes
+            http_status = match.group(2)
+            http_method = match.group(3)
+            title = match.group(4) or ""  # "" si non disponible
+            ip = match.group(5) or ""  # "" si non disponible
+            tech_list = match.group(6).split(", ") if match.group(6) else []
+
+            screenshot = screenshots.get(domain, None)
+
+            domain_results[domain] = {
+                "http_status": http_status,
+                "method": method.get(domain, http_method),  # Priorité à `get_methods_parallel`
+                "title": title,
+                "ip": ip,
+                "tech_list": tech_list,
+                "open_port": "xx",  # Placeholder
+                "screen": screenshot,
+                "phash": get_phash(screenshot),
+                "spfdmarc": spfdmarc.get(domain, None)
+            }
+
+    # Suppression du fichier temporaire
+    subprocess.run("rm file.txt", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    return domain_results
+
+
+
+def get_httpx_dataa(domains):
+    print(f"✔️  Get Httpx data")
+    domain_results = {}
     domains_str = "\n".join(domains)
-#f"echo \"{domains_str}\" > file.txt | httpx --tech-detect --silent -nc -timeout 3 -l file.txt"
     with open("file.txt", "w") as f:
         f.write("\n".join(domains))
 
@@ -130,10 +199,8 @@ def get_httpx_data(domains):
 
     if not result.stdout.strip():
         return {domain: None for domain in domains}
-
     method = get_methods_parallel(domains, max_workers=20)
     spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
-    #naabu = scan_naabu_fingerprint(domains, None)
     screenshots=take_screenshots_parallel(domains, max_workers=20)
     for line in result.stdout.split("\n"):
         match = re.search(r"(https?:\/\/[^\s]+) \[(\d+)\] \[(\w+)\] \[(.*?)\] \[(.*?)\] \[(.*?)\]", line)
@@ -141,8 +208,6 @@ def get_httpx_data(domains):
             full_url = match.group(1)
             domain = match.group(1).replace("https://", "").replace("http://", "")
             http_status = match.group(2)
-            #method = match.group(3)
-            #method = get_methods_parallel()
             methods = method.get(domain, None)
             title = match.group(4)
             ip = match.group(5)
