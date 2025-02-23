@@ -111,9 +111,6 @@ def get_methods_parallel(domains, max_workers=20):
     return methods
 
 
-import re
-import subprocess
-
 def get_httpx_data(domains):
     print(f"✔️  Get Httpx data")
     domain_results = {}
@@ -140,14 +137,14 @@ def get_httpx_data(domains):
     spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
     screenshots = take_screenshots_parallel(domains, max_workers=20)
 
-    # Regex mise à jour pour matcher 3 ou 6 éléments
     regex = re.compile(
-        r"(https?:\/\/[^\s]+) \[(\d+)\] \[(\w+)\]"  # URL, Status, Method (obligatoires)
-        r"(?: \[(.*?)\])?"  # Title (optionnel)
-        r"(?: \[(.*?)\])?"  # IP (optionnel)
-        r"(?: \[(.*?)\])?"  # Technologies (optionnel)
+        r"^(https?:\/\/[^\s]+)"  # URL
+        r" \[(\d+)\]"  # Status Code (obligatoire)
+        r" \[(\w+)\]"  # Method (obligatoire)
+        r"(?: \[([^\]]*)\])?"  # Title (optionnel)
+        r"(?: \[([\d\.]+)\])?"  # IP (optionnel, doit être une IP valide)
+        r"(?: \[([^\]]*)\])?$"  # Technologies (optionnel)
     )
-
     for line in result.stdout.split("\n"):
         match = regex.search(line)
         if match:
