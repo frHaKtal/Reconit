@@ -110,16 +110,13 @@ def get_methods_parallel(domains, max_workers=20):
                 methods[domain] = f"Error: {e}"
     return methods
 
-
 def get_httpx_data(domains):
     print(f"✔️  Get Httpx data")
-    domain_results = {}
+    domain_results = {domain: None for domain in domains}  # Init avec None
 
-    # Écriture des domaines dans un fichier temporaire
     with open("file.txt", "w") as f:
         f.write("\n".join(domains))
 
-    # Exécution de httpx
     result = subprocess.run(
         f"httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
         shell=True,
@@ -127,42 +124,67 @@ def get_httpx_data(domains):
         stderr=subprocess.PIPE,
         text=True
     )
-
-    # Si httpx ne retourne rien, on renvoie un dict avec des valeurs nulles
+    subprocess.run("rm file.txt", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if not result.stdout.strip():
-        return {domain: None for domain in domains}
+        return {domain: {
+            "http_status": "N/A",
+            "method": "N/A",
+            "title": "N/A",
+            "ip": "N/A",
+            "tech_list": [],
+            "open_port": "N/A",
+            "screen": None,
+            "phash": None,
+            "spfdmarc": "N/A"
+        } for domain in domains}
 
-    # Récupération des résultats parallèles
     method = get_methods_parallel(domains, max_workers=20)
     spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
     screenshots = take_screenshots_parallel(domains, max_workers=20)
 
     regex = re.compile(
-        r"^(https?:\/\/[^\s]+)"  # URL
-        r" \[(\d+)\]"  # Status Code (obligatoire)
-        r" \[(\w+)\]"  # Method (obligatoire)
-        r"(?: \[([^\]]*)\])?"  # Title (optionnel)
-        r"(?: \[([\d\.]+)\])?"  # IP (optionnel, doit être une IP valide)
-        r"(?: \[([^\]]*)\])?$"  # Technologies (optionnel)
+        r"^(https?:\/\/[^\s]+)"  # URL obligatoire
+        r"(?: \[(\d{3})\])?"  # Code statut HTTP (optionnel)
+        r"(?: \[(\w+)\])?"  # Méthode HTTP (optionnel)
+        r"(?: \[([^\[\]]+)\])?"  # Titre ou IP si erreur de position (optionnel)
+        r"(?: \[([\d\.]+)\])?"  # IP si bien placée (optionnel)
+        r"(?: \[([^\[\]]+)\])?$"  # Technologies (optionnel)
     )
+
+    parsed_domains = set()
+
     for line in result.stdout.split("\n"):
         match = regex.search(line)
         if match:
             full_url = match.group(1)
-            domain = full_url.replace("https://", "").replace("http://", "")
+            if not full_url:
+                continue
 
-            # Extraction des groupes avec valeurs par défaut si absentes
-            http_status = match.group(2)
-            http_method = match.group(3)
-            title = match.group(4) or ""  # "" si non disponible
-            ip = match.group(5) or ""  # "" si non disponible
+            domain = full_url.replace("https://", "").replace("http://", "").strip()
+            parsed_domains.add(domain)
+
+            http_status = match.group(2) or None
+            http_method = match.group(3) or None
+            title_or_ip = match.group(4) or None
+            ip = match.group(5) or None
             tech_list = match.group(6).split(", ") if match.group(6) else []
+
+            # Si l'IP est mal placée (ex: "302 Found" dans IP), corriger l'erreur
+            if title_or_ip and not ip:
+                try:
+                    socket.inet_aton(title_or_ip)
+                    ip = title_or_ip  # C'est une IP valide
+                    title = None
+                except socket.error:
+                    title = title_or_ip  # Ce n'est pas une IP
+            else:
+                title = title_or_ip
 
             screenshot = screenshots.get(domain, None)
 
             domain_results[domain] = {
                 "http_status": http_status,
-                "method": method.get(domain, http_method),  # Priorité à `get_methods_parallel`
+                "method": method.get(domain, http_method),
                 "title": title,
                 "ip": ip,
                 "tech_list": tech_list,
@@ -172,70 +194,21 @@ def get_httpx_data(domains):
                 "spfdmarc": spfdmarc.get(domain, None)
             }
 
-    # Suppression du fichier temporaire
-    subprocess.run("rm file.txt", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-    return domain_results
-
-
-
-def get_httpx_dataa(domains):
-    print(f"✔️  Get Httpx data")
-    domain_results = {}
-    domains_str = "\n".join(domains)
-    with open("file.txt", "w") as f:
-        f.write("\n".join(domains))
-
-    result = subprocess.run(
-        f"httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
-
-    if not result.stdout.strip():
-        return {domain: None for domain in domains}
-    method = get_methods_parallel(domains, max_workers=20)
-    spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
-    screenshots=take_screenshots_parallel(domains, max_workers=20)
-    for line in result.stdout.split("\n"):
-        match = re.search(r"(https?:\/\/[^\s]+) \[(\d+)\] \[(\w+)\] \[(.*?)\] \[(.*?)\] \[(.*?)\]", line)
-        if match:
-            full_url = match.group(1)
-            domain = match.group(1).replace("https://", "").replace("http://", "")
-            http_status = match.group(2)
-            methods = method.get(domain, None)
-            title = match.group(4)
-            ip = match.group(5)
-            tech_list = match.group(6).split(", ") if match.group(6) else []
-
-            domain_principal = re.search(r"([a-zA-Z0-9-]+\.[a-zA-Z]{2,})$", full_url)
-            #screenshot=take_screenshots_parallel(domain, max_workers=20)
-            screenshot = screenshots.get(domain, None)
+    for domain in domains:
+        if domain not in parsed_domains:
             domain_results[domain] = {
-                "http_status": http_status,
-                "method": methods,
-                "title": title,
-                "ip": ip,
-                "tech_list": tech_list,
-                #"open_port": naabu.get(domain,None),  # Scan des ports ouverts
-                "open_port": "xx",  # Scan des ports ouverts
-                "screen": screenshot,  # Capture d'écran
-                "phash": get_phash(screenshot),  # Perceptual hash de l'image
-                #"spfdmarc": get_spfdmarc(domain_principal.group(1))  # SPF/DMARC info
-                "spfdmarc": spfdmarc.get(domain, None)
+                "http_status": None,
+                "method": None,
+                "title": None,
+                "ip": None,
+                "tech_list": None,
+                "open_port": None,
+                "screen": None,
+                "phash": None,
+                "spfdmarc": None
             }
 
-    result = subprocess.run(
-        f"rm file.txt",
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
     return domain_results
-
 
 
 def take_screenshot_base64(url):
@@ -403,6 +376,8 @@ def get_phash(screenshot_base64):
 
 def maintest(domains, program_name):
     end=get_httpx_data(domains)
+    #print(end)
     all_ips = list(set(entry["ip"] for entry in end.values() if entry and entry["ip"]))
+    #all_ips = list(set(entry["ip"] for entry in end.values() if entry and entry("ip")))
     naabu = scan_naabu_fingerprint(all_ips)
     update_db(program_name,end,naabu)
