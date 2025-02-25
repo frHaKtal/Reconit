@@ -1,5 +1,6 @@
 ![Description de l'image](Reconit.png)
 ![Texte alternatif](Reconit.png)
+<img src="Reconit.png" alt="Texte alternatif" width="400">
 
 # Reconit
 Recon-it was created to address the need for automation in the pentesting/bug bounty phase, and especially to provide an overview during this phase.
