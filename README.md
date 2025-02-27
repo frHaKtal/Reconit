@@ -8,3 +8,4 @@ Only for **MacOs** with **iTerm2** and **font-jetbrains-mono-nerd-font** and **i
 ![Description de l'image](2.png)
 ![Description de l'image](3.png)
 ![Description de l'image](4.png)
+![Description du GIF](video.gif)
