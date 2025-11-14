@@ -1,44 +1,58 @@
+import ssl
 import base64
 import sqlite3
-import requests
-import socket
 import subprocess
-from playwright.sync_api import sync_playwright
-from concurrent.futures import ThreadPoolExecutor
-from rich.progress import Progress, SpinnerColumn, BarColumn, TimeRemainingColumn
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import concurrent.futures
-import tldextract
 import re
+import socket
+from PIL import Image
 import imagehash
 import io
-from PIL import Image
-import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from playwright.sync_api import sync_playwright
+from rich.progress import Progress, SpinnerColumn, BarColumn, TimeRemainingColumn
+import logging
+
+
+spfdmarc_cache = {}
+ssltls_cache = {}
+
+TLS_VULN_VERSION = {"TLSv1.0", "TLSv1.1", "SSLv2", "SSLv3"}
 
 def get_db_connection():
-    return sqlite3.connect('database.db')
-
+    return sqlite3.connect('database.db', check_same_thread=False)
 
 def execute_command(command, timeout=1):
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         return result.stdout.strip().split("\n") if result.stdout.strip() else []
-    except subprocess.TimeoutExpired:
-        #print(f"[⚠] Timeout : La commande {' '.join(command)} a dépassé {timeout} secondes.")
-        return []  # Retourne une liste vide si timeout
-    except Exception as e:
-        #print(f"[⚠] Erreur : {e}")
+    except (subprocess.TimeoutExpired, Exception):
         return []
+
+def get_main_domain(domain: str) -> str:
+    """
+    Extrait le domaine principal à partir d'un sous-domaine.
+    Exemple : "sub.example.com" -> "example.com"
+    """
+    parts = domain.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])  # Retourne les deux dernières parties
+    return domain  # Si le domaine est déjà un domaine principal (ex: "example.com")
 
 
 def get_spfdmarc(domain, timeout=1):
+    """Récupère les enregistrements SPF/DMARC pour un domaine."""
+    #print(f"✔️  Get Spf/Dmarc status")
+    main_domain = get_main_domain(domain)
+    if main_domain in spfdmarc_cache:
+        return spfdmarc_cache[main_domain]
 
     def get_dns_record(query):
         return execute_command(["dig", "TXT", query, "+short"], timeout=timeout)
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        spf_future = executor.submit(get_dns_record, domain)
-        dmarc_future = executor.submit(get_dns_record, f"_dmarc.{domain}")
+        spf_future = executor.submit(get_dns_record, main_domain)
+        dmarc_future = executor.submit(get_dns_record, f"_dmarc.{main_domain}")
 
         spf_records = spf_future.result()
         dmarc_records = dmarc_future.result()
@@ -46,29 +60,34 @@ def get_spfdmarc(domain, timeout=1):
     spf_check = "✔️" if any("v=spf1" in record for record in spf_records) else "❌"
     dmarc_check = "✔️" if any("v=DMARC1" in record for record in dmarc_records) else "❌"
 
-    return f"{spf_check} {dmarc_check}"
-
+    result = f"{spf_check} {dmarc_check}"
+    spfdmarc_cache[main_domain] = result  # Mettre en cache le résultat
+    return result
 
 def get_spfdmarc_parallel(domains, max_workers=20):
-
     print(f"✔️  Get Spf/Dmarc status")
-    results = {}
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_domain = {executor.submit(get_spfdmarc, domain): domain for domain in domains}
+        return {future_to_domain[future]: future.result() for future in concurrent.futures.as_completed(future_to_domain)}
 
-        for future in concurrent.futures.as_completed(future_to_domain):
-            domain = future_to_domain[future]
-            try:
-                results[domain] = future.result()
-            except Exception as e:
-                results[domain] = f"Error: {e}"
-
-    return results
-
+def get_ssl(domain: str, port: int = 443):
+    """Retourne les informations SSL/TLS d'un domaine."""
+    #print(f"✔️  Get SSL/TLS version")
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection((domain, port), timeout=5) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+                tls_version = ssock.version()
+                if tls_version in TLS_VULN_VERSION:
+                    return f"❌ ({tls_version})"
+                else:
+                    #print(tls_version)
+                    return tls_version
+    except Exception:
+        return None  # Retourne None en cas d'erreur
 
 def get_method(domain, timeout=1):
-
     def run_command(command):
         try:
             result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -94,38 +113,37 @@ def get_method(domain, timeout=1):
 
     return " | ".join(result) if result else "No methods found"
 
-
 def get_methods_parallel(domains, max_workers=20):
     print(f"✔️  Get http method")
-    methods = {}
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_domain = {executor.submit(get_method, domain): domain for domain in domains}
-
-        for future in concurrent.futures.as_completed(future_to_domain):
-            domain = future_to_domain[future]
-            try:
-                methods[domain] = future.result()
-            except Exception as e:
-                methods[domain] = f"Error: {e}"
-    return methods
+        return {future_to_domain[future]: future.result() for future in concurrent.futures.as_completed(future_to_domain)}
 
 def get_httpx_data(domains):
     print(f"✔️  Get Httpx data")
-    domain_results = {domain: None for domain in domains}  # Init avec None
-
     with open("file.txt", "w") as f:
         f.write("\n".join(domains))
 
     result = subprocess.run(
-        f"httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
+        "httpx -ip -title -method -sc -td --tech-detect --silent -nc -timeout 3 -l file.txt",
         shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True
+        text=False
     )
     subprocess.run("rm file.txt", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if not result.stdout.strip():
+
+# Decode output with error handling
+    try:
+        output = result.stdout.decode('utf-8')
+    except UnicodeDecodeError:
+        # Replace invalid bytes with a placeholder (e.g., �)
+        output = result.stdout.decode('utf-8', errors='replace')
+        # Alternatively, try a fallback encoding like 'latin1'
+        # output = result.stdout.decode('latin1')
+
+    if not output.strip():
+#    if not result.stdout.strip():
         return {domain: {
             "http_status": "N/A",
             "method": "N/A",
@@ -135,11 +153,22 @@ def get_httpx_data(domains):
             "open_port": "N/A",
             "screen": None,
             "phash": None,
-            "spfdmarc": "N/A"
+            "spfdmarc": "N/A",
+            "ssltls": "N/A"
         } for domain in domains}
 
+
+    # Récupérer les résultats SPF/DMARC pour tous les domaines principaux
+    main_domains = set(get_main_domain(domain) for domain in domains)
+    print(f"✔️  Get Spf/Dmarc status")
+    print(f"✔️  Get SSL/TLS version")
+    for main_domain in main_domains:
+        if main_domain not in spfdmarc_cache:
+            spfdmarc_cache[main_domain] = get_spfdmarc(main_domain)
+            ssltls_cache[main_domain] = get_ssl(main_domain)
+
     method = get_methods_parallel(domains, max_workers=20)
-    spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
+    #spfdmarc = get_spfdmarc_parallel(domains, max_workers=20)
     screenshots = take_screenshots_parallel(domains, max_workers=20)
 
     regex = re.compile(
@@ -151,9 +180,9 @@ def get_httpx_data(domains):
         r"(?: \[([^\[\]]+)\])?$"  # Technologies (optionnel)
     )
 
-    parsed_domains = set()
-
-    for line in result.stdout.split("\n"):
+    domain_results = {}
+    for line in output.split("\n"):
+    #for line in result.stdout.split("\n"):
         match = regex.search(line)
         if match:
             full_url = match.group(1)
@@ -161,109 +190,86 @@ def get_httpx_data(domains):
                 continue
 
             domain = full_url.replace("https://", "").replace("http://", "").strip()
-            parsed_domains.add(domain)
-
             http_status = match.group(2) or None
             http_method = match.group(3) or None
             title_or_ip = match.group(4) or None
             ip = match.group(5) or None
             tech_list = match.group(6).split(", ") if match.group(6) else []
 
-            # Si l'IP est mal placée (ex: "302 Found" dans IP), corriger l'erreur
             if title_or_ip and not ip:
                 try:
                     socket.inet_aton(title_or_ip)
-                    ip = title_or_ip  # C'est une IP valide
+                    ip = title_or_ip
                     title = None
                 except socket.error:
-                    title = title_or_ip  # Ce n'est pas une IP
+                    title = title_or_ip
             else:
                 title = title_or_ip
 
             screenshot = screenshots.get(domain, None)
+            main_domain = get_main_domain(domain)
 
+            spfdmarc = spfdmarc_cache.get(main_domain, "N/A")
+            ssltls = ssltls_cache.get(main_domain, "N/A")
             domain_results[domain] = {
                 "http_status": http_status,
                 "method": method.get(domain, http_method),
                 "title": title,
                 "ip": ip,
                 "tech_list": tech_list,
-                "open_port": "xx",  # Placeholder
+                "open_port": "xx",
                 "screen": screenshot,
                 "phash": get_phash(screenshot),
-                "spfdmarc": spfdmarc.get(domain, None)
-            }
-
-    for domain in domains:
-        if domain not in parsed_domains:
-            domain_results[domain] = {
-                "http_status": None,
-                "method": None,
-                "title": None,
-                "ip": None,
-                "tech_list": None,
-                "open_port": None,
-                "screen": None,
-                "phash": None,
-                "spfdmarc": None
+                "spfdmarc": spfdmarc,
+                "ssltls": ssltls
             }
 
     return domain_results
 
 
+
+
+
 def take_screenshot_base64(url):
-    #print(f"screenshot {url}")
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            #print(url)
-            page.goto(f"http://{url}", timeout=2000)  # Timeout max de 2s
+            try:
+                page.goto(f"https://{url}", timeout=10000)
+            except Exception:
+                page.goto(f"http://{url}", timeout=10000)
             screenshot = page.screenshot()
             browser.close()
             return base64.b64encode(screenshot).decode('utf-8')
     except Exception as e:
-        #print(f"[✘] Failed: {url} -> {e}")
+        print(f"⚠️ Error capturing screenshot for {url}: {e}")
         return None
 
-
-
-def take_screenshots_parallel(urls, max_workers=20):
+def take_screenshots_parallel(urls, max_workers=10):
     if isinstance(urls, str):
         urls = [urls]
 
     results = {}
-
-    with Progress(
-        SpinnerColumn(),  # Petit spinner
-        "[progress.description]{task.description}",  # Description de la tâche
-        BarColumn(),  # Barre de progression
-        TimeRemainingColumn(),  # Temps restant estimé
-    ) as progress:
+    with Progress(SpinnerColumn(), "[progress.description]{task.description}", BarColumn(), TimeRemainingColumn()) as progress:
         task = progress.add_task("Capturing Screenshots", total=len(urls))
-
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(take_screenshot_base64, url): url for url in urls}
-
-            for future in as_completed(futures):
+            for future in concurrent.futures.as_completed(futures):
                 url = futures[future]
                 try:
                     screenshot = future.result()
                     if screenshot:
                         results[url] = screenshot
-                except Exception as e:
-                    results[url] = f"Error: {e}"  # Garde l'erreur dans le dict
-
-                progress.update(task, advance=1)  # ✅ Indentation correcte ici
-
+                except Exception:
+                    results[url] = "Error"
+                progress.update(task, advance=1)
     return results
-
 
 def update_db(program_name, domain_data, naabu_results):
     print(f"✔️  Update db")
-    with sqlite3.connect("database.db") as conn:
+    with get_db_connection() as conn:
         cursor = conn.cursor()
-
         cursor.execute("SELECT id FROM programs WHERE program_name = ?", (program_name,))
         program_id = cursor.fetchone()
 
@@ -281,32 +287,25 @@ def update_db(program_name, domain_data, naabu_results):
                 'INSERT OR IGNORE INTO domains (program_id, domain_name) VALUES (?, ?)',
                 (program_id, domain)
             )
-
             cursor.execute(
                 'SELECT id FROM domains WHERE program_id = ? AND domain_name = ?',
                 (program_id, domain)
             )
             result = cursor.fetchone()
-            #domain_id = cursor.fetchone()[0]
+
             if result is None:
                 print(f"⚠️ Erreur : Aucun domaine trouvé pour {domain} dans le programme {program_name}.")
-                continue  # Passer au domaine suivant
+                continue
 
             domain_id = result[0]
-
-            # Récupérer l'IP associée au domaine
             ip = data["ip"] if data["ip"] else None
-            #print(ip)
-            # Récupérer les ports ouverts pour cette IP via Naabu
-            #open_ports = ",".join(map(str, naabu_results.get(ip, []))) if ip else None
             open_ports = ",".join(map(str, naabu_results.get(str(ip), []))) if ip else None
-
             data["open_port"] = open_ports
 
             cursor.execute('''
                 INSERT INTO domain_details
-                (domain_id, http_status, method, title, ip, techno, open_port, screen, phash, spfdmarc)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (domain_id, http_status, method, title, ip, techno, open_port, screen, phash, spfdmarc,ssltls)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?)
             ''', (
                 domain_id,
                 data["http_status"] if data["http_status"] else None,
@@ -317,22 +316,20 @@ def update_db(program_name, domain_data, naabu_results):
                 str(data["open_port"]) if data["open_port"] else None,
                 str(data["screen"]) if data["screen"] else None,
                 str(data["phash"]) if data["phash"] else None,
-                str(data["spfdmarc"]) if data["spfdmarc"] else None
+                str(data["spfdmarc"]) if data["spfdmarc"] else None,
+                str(data["ssltls"]) if data["spfdmarc"] else None
             ))
 
         conn.commit()
 
-
 def scan_naabu_fingerprint(domains_ips):
     print(f"✔️  Portscan with Naabu")
-    domains_str = "\n".join(domains_ips)
     with open("ips.txt", "w") as f:
         f.write("\n".join(domains_ips) + "\n")
 
     try:
         result = subprocess.run(
-            f"naabu -l ips.txt -retries 1 -ec -silent -s s 2>/dev/null",
-#f"echo {domains_str} > ips.txt | naabu -l ips.txt -retries 1 -ec -silent -s s 2>/dev/null | grep -oP '\d+(?=\s*$)' | tr '\n' ',' | sed 's/,$//'",
+            "naabu -l ips.txt -retries 1 -ec -silent -tp 1000 -s s 2>/dev/null",
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -340,27 +337,18 @@ def scan_naabu_fingerprint(domains_ips):
         )
         ip_ports = {}
         for line in result.stdout.splitlines():
-            match = re.match(r"(\d+\.\d+\.\d+\.\d+):(\d+)", line)  # Extraction IP:PORT
+            match = re.match(r"(\d+\.\d+\.\d+\.\d+):(\d+)", line)
             if match:
                 ip, port = match.groups()
                 if ip not in ip_ports:
                     ip_ports[ip] = []
                 ip_ports[ip].append(int(port))
 
-        result = subprocess.run(
-            f"rm ips.txt",
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+        subprocess.run("rm ips.txt", shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         return ip_ports
 
-    except subprocess.TimeoutExpired:
-        return {}  # Timeout, retourne un dict vide
-    except Exception as e:
-        return None  # Erreur, retourne None
-
+    except (subprocess.TimeoutExpired, Exception):
+        return {}
 
 def get_phash(screenshot_base64):
     try:
@@ -368,16 +356,12 @@ def get_phash(screenshot_base64):
         image = Image.open(io.BytesIO(image_data))
         phash_value = str(imagehash.phash(image))
         return phash_value
-
-    except Exception as e:
-        #print(f"Failed to calculate phash: {e}")
+    except Exception:
         return None
 
-
 def maintest(domains, program_name):
-    end=get_httpx_data(domains)
-    #print(end)
+    end = get_httpx_data(domains)
     all_ips = list(set(entry["ip"] for entry in end.values() if entry and entry["ip"]))
-    #all_ips = list(set(entry["ip"] for entry in end.values() if entry and entry("ip")))
     naabu = scan_naabu_fingerprint(all_ips)
-    update_db(program_name,end,naabu)
+    #print(end)
+    update_db(program_name, end, naabu)

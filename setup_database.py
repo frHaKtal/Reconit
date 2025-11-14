@@ -39,6 +39,7 @@ def setup_database():
             fuzz TEXT,
             nuclei TEXT,
             spfdmarc TEXT,
+            ssltls TEXT,
             method TEXT,
             domain_id INTEGER,
             com TEXT,
