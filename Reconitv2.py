@@ -1256,7 +1256,7 @@ def main():
     """Fonction principale."""
     if len(sys.argv) > 1:
         session = PromptSession()
-        lolcat("\n【Welcome to Recon-it v1.0 by _frHaKtal_】")
+        lolcat("\n【Welcome to Recon-it v2.0 by _frHaKtal_】")
         lolcat("‼️ Press tab for autocompletion and available commands\n")
         setup_database()
         program_name = sys.argv[1]
